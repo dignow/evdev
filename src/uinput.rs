@@ -4,7 +4,7 @@
 
 use crate::constants::EventType;
 use crate::inputid::{BusType, InputId};
-use crate::{sys, AttributeSetRef, InputEvent, Key, RelativeAxisType, SwitchType};
+use crate::{sys, AttributeSet, AttributeSetRef, InputEvent, Key, RelativeAxisType, SwitchType};
 use libc::O_NONBLOCK;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -139,6 +139,7 @@ const DEFAULT_ID: libc::input_id = libc::input_id {
 
 pub struct VirtualDevice {
     file: File,
+    file_event: File,
 }
 
 impl VirtualDevice {
@@ -147,7 +148,62 @@ impl VirtualDevice {
         unsafe { sys::ui_dev_setup(file.as_raw_fd(), usetup)? };
         unsafe { sys::ui_dev_create(file.as_raw_fd())? };
 
-        Ok(VirtualDevice { file })
+        let file_event = Self::open_event_file(&file)?;
+
+        Ok(VirtualDevice { file, file_event })
+    }
+
+    fn open_event_file(file: &File) -> io::Result<File> {
+        unsafe {
+            let mut name = [0u8; 32];
+            sys::ui_get_sysname(file.as_raw_fd(), &mut name)?;
+
+            let mut first_nul = name.len()-1;
+            for i in 0..first_nul {
+                if name[i] == 0 {
+                    first_nul = i;
+                    break;
+                }
+            }
+
+            match std::str::from_utf8(&name[0..first_nul]) {
+                Ok(input_name) => {
+                    let input_dir = format!("/sys/devices/virtual/input/{}", input_name);
+                    let mut readdir = std::fs::read_dir(&input_dir)?;
+                    use std::os::unix::ffi::OsStrExt;
+                    loop {
+                        match readdir.next() {
+                            Some(Ok(entry)) => {
+                                if let Some(fname) = entry.path().file_name() {
+                                    if fname.as_bytes().starts_with(b"event") {
+                                        let event_file =
+                                            format!("/dev/input/{}", fname.to_string_lossy());
+                                        return OpenOptions::new()
+                                            .read(true)
+                                            // .write(true)
+                                            .custom_flags(O_NONBLOCK)
+                                            .open(event_file);
+                                    }
+                                }
+                            }
+                            None => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    format!("Failed to find event of input: {}", &input_dir),
+                                ));
+                            }
+                            Some(Err(_e)) => {
+                                // ignore
+                            }
+                        }
+                    }
+                }
+                Err(e) => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Failed to find event, err: {}", e),
+                )),
+            }
+        }
     }
 
     #[inline]
@@ -167,5 +223,22 @@ impl VirtualDevice {
         self.write_raw(messages)?;
         let syn = InputEvent::new(EventType::SYNCHRONIZATION, 0, 0);
         self.write_raw(&[syn])
+    }
+
+    /// Retrieve the current keypress state directly via kernel syscall.
+    #[inline]
+    pub fn get_key_state(&self) -> io::Result<AttributeSet<Key>> {
+        let mut key_vals = AttributeSet::new();
+        self.update_key_state(&mut key_vals)?;
+        Ok(key_vals)
+    }
+
+    /// Fetch the current kernel key state directly into the provided buffer.
+    /// If you don't already have a buffer, you probably want
+    /// [`get_key_state`](Self::get_key_state) instead.
+    #[inline]
+    pub fn update_key_state(&self, key_vals: &mut AttributeSet<Key>) -> io::Result<()> {
+        unsafe { sys::eviocgkey(self.file_event.as_raw_fd(), key_vals.as_mut_raw_slice())? };
+        Ok(())
     }
 }

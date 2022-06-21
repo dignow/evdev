@@ -40,6 +40,7 @@ ioctl_write_int!(eviocsclockid, b'E', 0xa0);
 const UINPUT_IOCTL_BASE: u8 = b'U';
 ioctl_write_ptr!(ui_dev_setup, UINPUT_IOCTL_BASE, 3, uinput_setup);
 ioctl_none!(ui_dev_create, UINPUT_IOCTL_BASE, 1);
+ioctl_read_buf!(ui_get_sysname, UINPUT_IOCTL_BASE, 44, u8);
 
 ioctl_write_int!(ui_set_evbit, UINPUT_IOCTL_BASE, 100);
 ioctl_write_int!(ui_set_keybit, UINPUT_IOCTL_BASE, 101);
